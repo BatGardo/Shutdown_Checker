@@ -59,7 +59,7 @@ CANCEL_RE = r"скасова|завершен|припинен"
 EMERGENCY_REPEAT = timedelta(hours=3)
 
 DEYE_EVERY = _seconds("DEYE_POLL_SECONDS", 300)   # seconds between Deye Cloud polls per inverter
-ALERT_TTL = _seconds("ALERT_TTL_SECONDS", 6 * 3600)  # alerts (grid off/on, emergency start/end) are deleted after this
+ALERT_TTL = _seconds("ALERT_TTL_SECONDS", 30 * 60)  # every message except the status is deleted after this
 DEYE_STALE = timedelta(minutes=20)  # no fresh data / API errors this long -> tell the owner
 TOKEN_WARN_DAYS = 7
 
@@ -302,11 +302,15 @@ class Bot:
             self.tg.delete(chat_id, old)
 
     def send_alert(self, chat_id: int, text: str, loud: bool = False) -> None:
-        """Send an event alert right away; it is deleted after ALERT_TTL seconds. Silent unless loud."""
+        """Every message except the status: alerts, reminders, replies. Silent unless loud (Grid Off/On).
+        Deleted after ALERT_TTL, so the chat keeps only the one status message."""
         msg = self.tg.send(chat_id, text, loud=loud)
+        self.schedule_delete(chat_id, msg["message_id"])
+
+    def schedule_delete(self, chat_id: int, message_id: int) -> None:
         with self.lock:
             self.state.setdefault("deletes", []).append(
-                {"chat": chat_id, "id": msg["message_id"], "at": time.time() + ALERT_TTL})
+                {"chat": chat_id, "id": message_id, "at": time.time() + ALERT_TTL})
             self.save()
 
     def process_deletes(self) -> None:
@@ -432,6 +436,10 @@ class Bot:
 
     def handle(self, msg: dict) -> None:
         chat_id = msg["chat"]["id"]
+        # The user's own messages go too (bots may delete incoming messages in private chats),
+        # so the chat keeps only the status.
+        if msg.get("message_id") and msg["chat"].get("type", "private") == "private":
+            self.schedule_delete(chat_id, msg["message_id"])
         text = (msg.get("text") or "").strip()
         if not text:
             return
@@ -441,7 +449,7 @@ class Bot:
         chat = self.state["chats"].get(key)
 
         if cmd == "/myid":
-            self.tg.send(chat_id, f"This chat's id: <code>{chat_id}</code>\nPut it into DEYE_n_OWNER_CHAT to get "
+            self.send_alert(chat_id, f"This chat's id: <code>{chat_id}</code>\nPut it into DEYE_n_OWNER_CHAT to get "
                                   "that inverter's alerts here.")
             return
         if cmd == "/start":
@@ -450,7 +458,7 @@ class Bot:
                                                             "tracker": 0, "sent": {}, "reminded": []})
                 chat["active"] = True
                 self.save()
-            self.tg.send(chat_id, html.escape(HELP))
+            self.send_alert(chat_id, html.escape(HELP))
             if chat.get("group"):
                 self.send_status(chat_id, self.status(chat["group"], chat_id=chat_id))
             return
@@ -458,16 +466,16 @@ class Bot:
             self.handle_deye(chat_id)
             return
         if chat is None:
-            self.tg.send(chat_id, "Send /start first.")
+            self.send_alert(chat_id, "Send /start first.")
             return
 
         if cmd == "/group" or dtek.group_key(cmd) in dtek.known_groups(self.refresh()):
             value = arg.strip() if cmd == "/group" else cmd
             if not value:
-                self.tg.send(chat_id, f"Your group: {chat.get('group') or 'not set'}. Example: /group 33.1")
+                self.send_alert(chat_id, f"Your group: {chat.get('group') or 'not set'}. Example: /group 33.1")
                 return
             if dtek.group_key(value) not in dtek.known_groups(self.refresh()):
-                self.tg.send(chat_id, f"Unknown group {html.escape(value)}. Example: /group 33.1")
+                self.send_alert(chat_id, f"Unknown group {html.escape(value)}. Example: /group 33.1")
                 return
             group = value.upper().removeprefix("GPV")
             with self.lock:
@@ -485,7 +493,7 @@ class Bot:
                 minutes = max(0, min(limit, int(arg.strip())))
             except ValueError:
                 value = f"{chat[name]} min" if chat.get(name) else "off"
-                self.tg.send(chat_id, f"{cmd}: {value}. Example: {example} (0 = off)")
+                self.send_alert(chat_id, f"{cmd}: {value}. Example: {example} (0 = off)")
                 return
             if name == "tracker" and 0 < minutes < 5:
                 minutes = 5
@@ -494,21 +502,21 @@ class Bot:
                 if name == "tracker":
                     chat["tracker_last"] = time.time()
                 self.save()
-            self.tg.send(chat_id, on_text.format(minutes) if minutes else off_text)
+            self.send_alert(chat_id, on_text.format(minutes) if minutes else off_text)
             if name == "tracker" and minutes and self.need_group(chat_id, chat):
                 self.send_status(chat_id, self.status(chat["group"], chat_id=chat_id))
         elif cmd == "/stop":
             with self.lock:
                 chat["active"] = False
                 self.save()
-            self.tg.send(chat_id, "Stopped. Send /start to subscribe again.")
+            self.send_alert(chat_id, "Stopped. Send /start to subscribe again.")
         else:
-            self.tg.send(chat_id, html.escape(HELP))
+            self.send_alert(chat_id, html.escape(HELP))
 
     def handle_deye(self, chat_id: int) -> None:
         mine = self.owned(chat_id)
         if not mine:
-            self.tg.send(chat_id, f"No inverter is linked to this chat. Its id is <code>{chat_id}</code>: put it "
+            self.send_alert(chat_id, f"No inverter is linked to this chat. Its id is <code>{chat_id}</code>: put it "
                                   "into DEYE_n_OWNER_CHAT in the Render Secret File.")
             return
         lines = []
@@ -517,12 +525,12 @@ class Bot:
                 lines.append(deye.describe(self.read_inverter(inv), inv.name))
             except Exception as exc:
                 lines.append(f"🏠 {inv.name}: Deye Cloud error ({exc})")
-        self.tg.send(chat_id, html.escape("\n".join(lines)))
+        self.send_alert(chat_id, html.escape("\n".join(lines)))
 
     def need_group(self, chat_id: int, chat: dict) -> bool:
         if chat.get("group"):
             return True
-        self.tg.send(chat_id, "Set your group first, for example: /group 33.1")
+        self.send_alert(chat_id, "Set your group first, for example: /group 33.1")
         return False
 
     # ---------- background ----------
@@ -633,12 +641,12 @@ class Bot:
         for begins, ends, end_known in outage_starts(data, group, now):
             tag = f"{begins:%Y-%m-%d %H:%M}"
             if tag not in done and due(begins, off_min):
-                self.tg.send(chat_id, f"⚠️ Power goes off in {left(begins)} min: {when(begins)}-"
+                self.send_alert(chat_id, f"⚠️ Power goes off in {left(begins)} min: {when(begins)}-"
                                       f"{span_end(begins, ends) if end_known else '?'} (group {group})")
                 done.add(tag)
             on_tag = f"on {ends:%Y-%m-%d %H:%M}"
             if end_known and on_tag not in done and due(ends, on_min):
-                self.tg.send(chat_id, f"🔌 Power comes back in {left(ends)} min: {when(ends)} (group {group})")
+                self.send_alert(chat_id, f"🔌 Power comes back in {left(ends)} min: {when(ends)} (group {group})")
                 done.add(on_tag)
         keep_from = f"{now - timedelta(hours=1):%Y-%m-%d %H:%M}"
         chat["reminded"] = sorted(t for t in done if t.removeprefix("on ") >= keep_from)

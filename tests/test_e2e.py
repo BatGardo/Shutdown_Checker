@@ -45,6 +45,7 @@ class TG:
     ids: list[tuple[int, int, str]] = []
     deleted: list[tuple[int, int]] = []
     loud: list[tuple[str, bool]] = []
+    incoming: list[tuple[int, int, str]] = []
 
 
 def parse_multipart(body: bytes, ctype: str) -> tuple[dict, dict]:
@@ -209,7 +210,10 @@ def main():
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
 
     def post(chat, text, secret=None):
-        upd = {"update_id": int(time.time() * 1000) % 10**9, "message": {"chat": {"id": chat}, "text": text}}
+        TG.next_id += 1
+        upd = {"update_id": int(time.time() * 1000) % 10**9, "message": {
+            "message_id": TG.next_id, "chat": {"id": chat, "type": "private"}, "text": text}}
+        TG.incoming.append((chat, TG.next_id, text))
         return http("POST", f"http://127.0.0.1:{port}/telegram", json.dumps(upd).encode(),
                     {"Content-Type": "application/json",
                      "X-Telegram-Bot-Api-Secret-Token": secret or TG.webhook.get("secret_token", "")})
@@ -261,6 +265,12 @@ def main():
               f"only Grid Off/On with sound: {len(loud_texts)} loud of {len(sounds)}")
         lost_id = next(mid for c, mid, t in TG.ids if c == 1 and "grid lost" in t)
         check(wait(lambda: (1, lost_id) in TG.deleted, 20), "grid alert deleted after ALERT_TTL")
+        myid_reply = next(mid for c, mid, t in TG.ids if c == 3 and "<code>3</code>" in t)
+        check(wait(lambda: (3, myid_reply) in TG.deleted, 20), "command reply deleted after ALERT_TTL")
+        cmd_id = next(mid for c, mid, t in TG.incoming if c == 3 and t == "/myid")
+        check(wait(lambda: (3, cmd_id) in TG.deleted, 20), "user command message deleted after ALERT_TTL")
+        live_status = [mid for c, mid, t in TG.ids if c == 1 and "<pre>" in t][-1]
+        check((1, live_status) not in TG.deleted, "latest status is kept")
 
         check(wait(lambda: len(msgs(CHANNEL)) >= 1), "channel got a status after start")
         ch = msgs(CHANNEL)[0]
