@@ -52,6 +52,22 @@ Standard library only, no dependencies.
 3. Channel id: open the channel in [web.telegram.org/a](https://web.telegram.org/a/); the address ends with
    `#-100…`. That number (with the minus) is `STATE_CHAT_ID`.
 
+### 1a. Channels for people (optional, one per inverter or group)
+
+Create a channel for the people who should see the schedule (separate from the state channel). Add the bot
+as an administrator with **Post messages** and **Delete messages of others**. For each channel `n`
+(1, 2, …) set on Render:
+
+| Variable | Meaning |
+|---|---|
+| `CHANNEL_n_ID` | channel id (`-100…`, found the same way as `STATE_CHAT_ID`) |
+| `CHANNEL_n_GROUP` | outage group shown in that channel, e.g. `33.1` |
+| `CHANNEL_n_TRACKER` | minutes between in-place status refreshes (no notification), `0` = off; default 10 |
+| `CHANNEL_n_REMIND` / `CHANNEL_n_REMIND_ON` | minutes before an outage / before power returns, `0` = off |
+
+Set `DEYE_n_OWNER_CHAT` to a channel's id to show that inverter in that channel's status and post its
+Grid Off/On alerts there (with sound). Emergency start/end alerts go to every channel automatically.
+
 ### 2. `.env`
 
 Copy `.env.example` to `.env` (already done in this folder) and fill in `TELEGRAM_TOKEN`, `REGION`,

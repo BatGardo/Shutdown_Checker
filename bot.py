@@ -382,7 +382,12 @@ class Bot:
                 self.send_alert(owner, text, loud=True)   # the only messages with sound
                 log(f"{inv.key}: grid {'on' if present else 'off'}")
             if present != st.get("present"):
+                announced = st.get("present") is not None
                 st.update(present=present, since=when.isoformat())
+                if announced:   # save at once, so a crash/restart does not announce it again
+                    self.save()
+                    self.flush()
+                    return
         self.save()
 
     def warn_token(self, inv: Inverter, st: dict) -> None:
@@ -536,8 +541,28 @@ class Bot:
                     chat["active"] = False
         self.save()
 
+    def setup_channel(self, ch) -> None:
+        """A channel is a subscriber whose settings come from env (CHANNEL_n_*), re-applied on every
+        start. Everything else (status, schedule changes, tracker, reminders, emergency alerts, and
+        inverter alerts when DEYE_n_OWNER_CHAT is the channel) works as for a private chat."""
+        with self.lock:
+            chat = self.state["chats"].setdefault(str(ch.chat_id), {"sent": {}, "reminded": []})
+            if chat.get("group") != ch.group:
+                chat.update(sent={}, reminded=[], needs_status=True)
+            if not chat.get("status_msg"):
+                chat["needs_status"] = True
+            chat.update(group=ch.group, tracker=ch.tracker, remind=ch.remind, remind_on=ch.remind_on,
+                        active=True, is_channel=True)
+            self.save()
+        log(f"channel {ch.chat_id}: group {ch.group}, tracker {ch.tracker} min, remind {ch.remind} min, "
+            f"remind_on {ch.remind_on} min")
+
     def check_chat(self, chat_id: int, chat: dict, data: dict, now: datetime) -> None:
         group = chat["group"]
+        if chat.pop("needs_status", False):   # channel: first status after setup; no "changed" alert for it
+            chat["sent"] = day_hashes(data, group, now)
+            self.send_status(chat_id, self.status(group, chat_id=chat_id))
+            chat["tracker_last"] = time.time()
         hashes = day_hashes(data, group, now)
         old = chat.get("sent", {})
         changed = [d for d, h in hashes.items() if old.get(d) != h]
@@ -560,6 +585,7 @@ class Bot:
         last = self.state.get("channel_last_id")
         first_run = last is None or self.state.get("channel") != self.channel
         em = self.state.setdefault("emergency", {"active": False, "alert_at": None, "post": None})
+        announced = False
         for post in posts:
             if not first_run and post["id"] <= last:
                 continue
@@ -579,8 +605,12 @@ class Bot:
             if send and not first_run:   # first run rebuilds the state without resending old posts
                 self.broadcast(emergency_message(post, kind, self.channel))
                 log(f"channel post {post['id']}: {kind}, broadcast")
+                announced = True
         self.state["channel"] = self.channel
         self.state["channel_last_id"] = posts[-1]["id"] if first_run else max(last, posts[-1]["id"])
+        if announced:   # save at once, so a crash/restart does not broadcast it again
+            self.save()
+            self.flush()
 
     def broadcast(self, text: str) -> None:
         with self.lock:
@@ -636,6 +666,8 @@ class Bot:
         """Load state, register commands, start background threads. Returns getMe."""
         me = self.tg.call("getMe")
         self.load_state()
+        for ch in self.settings.channels:
+            self.setup_channel(ch)
         try:
             self.tg.call("setMyCommands", commands=[{"command": c, "description": d} for c, d in COMMANDS])
         except Exception as exc:

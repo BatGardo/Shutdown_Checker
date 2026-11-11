@@ -67,6 +67,16 @@ class Inverter:
 
 
 @dataclass
+class Channel:
+    """A Telegram channel the bot posts to (people only read it, so settings come from env)."""
+    chat_id: int
+    group: str
+    tracker: int = 10      # minutes between in-place status refreshes, 0 = off
+    remind: int = 0        # minutes before an outage, 0 = off
+    remind_on: int = 0     # minutes before power returns, 0 = off
+
+
+@dataclass
 class Settings:
     telegram_token: str
     region: str = "kyiv"
@@ -76,6 +86,7 @@ class Settings:
     port: int = 10000
     telegram_api: str = "https://api.telegram.org"
     inverters: list[Inverter] = field(default_factory=list)
+    channels: list[Channel] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -115,6 +126,29 @@ def read_inverters(env: dict[str, str], warnings: list[str]) -> list[Inverter]:
     return out
 
 
+def read_channels(env: dict[str, str], warnings: list[str]) -> list[Channel]:
+    """CHANNEL_1_ID, CHANNEL_1_GROUP, CHANNEL_1_TRACKER, CHANNEL_1_REMIND, CHANNEL_1_REMIND_ON; then 2, 3...
+    Unnumbered CHANNEL_ID / CHANNEL_GROUP / ... are accepted as one more channel."""
+    out: list[Channel] = []
+    prefixes = ["CHANNEL_"] + [f"CHANNEL_{n}_" for n in range(1, MAX_INVERTERS + 1)]
+    for p in prefixes:
+        chat_id = _int(env.get(p + "ID"))
+        if chat_id is None:
+            continue
+        group = (env.get(p + "GROUP") or "").strip().upper().removeprefix("GPV")
+        if not group:
+            warnings.append(f"{p}ID is set but {p}GROUP is empty: that channel is skipped")
+            continue
+        if any(c.chat_id == chat_id for c in out):
+            warnings.append(f"{p}ID repeats another channel: skipped")
+            continue
+        minutes = lambda key, default: max(0, _int(env.get(p + key)) if _int(env.get(p + key)) is not None
+                                           else default)
+        out.append(Channel(chat_id=chat_id, group=group, tracker=minutes("TRACKER", 10),
+                           remind=minutes("REMIND", 0), remind_on=minutes("REMIND_ON", 0)))
+    return out
+
+
 def settings() -> Settings:
     load_env()
     env = dict(os.environ)
@@ -133,6 +167,7 @@ def settings() -> Settings:
         warnings=warnings,
     )
     s.inverters = read_inverters(env, warnings)
+    s.channels = read_channels(env, warnings)
     if s.mode == "webhook" and s.state_chat_id is None:
         warnings.append("STATE_CHAT_ID is not set: on Render the state (subscribers, groups) is lost on every restart")
     return s

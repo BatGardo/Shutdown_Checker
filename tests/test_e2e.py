@@ -22,6 +22,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TOKEN = "123:TEST"
 STATE_CHAT = -100500
+CHANNEL = -100777
+CHANNEL2 = -100888
 FAILS: list[str] = []
 
 
@@ -128,7 +130,7 @@ class FakeTelegram(BaseHTTPRequestHandler):
 
 # ---------- fake Deye ----------
 class DY:
-    volts = {"SN1": 231.0, "SN2": 229.0}
+    volts = {"SN1": 231.0, "SN2": 229.0, "SN4": 230.0, "SN5": 232.0}
     paths: list[str] = []
 
 
@@ -141,7 +143,7 @@ class FakeDeye(BaseHTTPRequestHandler):
         DY.paths.append(self.path)
         auth = self.headers.get("Authorization")
         sn = body.get("deviceList", [""])[0]
-        ok = (auth, sn) in (("Bearer TOK1", "SN1"), ("Bearer TOK2", "SN2"))
+        ok = (auth, sn) in (("Bearer TOK1", "SN1"), ("Bearer TOK2", "SN2"), ("Bearer TOK4", "SN4"), ("Bearer TOK5", "SN5"))
         out = {"success": ok, "msg": None if ok else "token invalid"}
         if ok:
             out["deviceDataList"] = [{"deviceSn": sn, "collectionTime": int(time.time()), "dataList": [
@@ -194,7 +196,13 @@ def main():
            "DEYE_2_NAME": "Parents", "DEYE_2_TOKEN": "TOK2", "DEYE_2_DEVICE_SN": "SN2", "DEYE_2_OWNER_CHAT": "2",
            "DEYE_2_BASE_URL": f"http://127.0.0.1:{dy.server_port}/v1.0",
            "DEYE_2_TOKEN_EXPIRES": (date.today() + timedelta(days=3)).isoformat(),
-           "DEYE_3_NAME": "Broken", "PYTHONIOENCODING": "utf-8"}
+           "DEYE_3_NAME": "Broken", "PYTHONIOENCODING": "utf-8",
+           "DEYE_4_NAME": "Shared", "DEYE_4_TOKEN": "TOK4", "DEYE_4_DEVICE_SN": "SN4", "DEYE_4_OWNER_CHAT": str(CHANNEL),
+           "DEYE_4_BASE_URL": f"http://127.0.0.1:{dy.server_port}/v1.0",
+           "CHANNEL_1_ID": str(CHANNEL), "CHANNEL_1_GROUP": "33.1", "CHANNEL_1_TRACKER": "10", "CHANNEL_1_REMIND": "15",
+           "DEYE_5_NAME": "Second", "DEYE_5_TOKEN": "TOK5", "DEYE_5_DEVICE_SN": "SN5", "DEYE_5_OWNER_CHAT": str(CHANNEL2),
+           "DEYE_5_BASE_URL": f"http://127.0.0.1:{dy.server_port}/v1.0",
+           "CHANNEL_2_ID": str(CHANNEL2), "CHANNEL_2_GROUP": "2.1", "CHANNEL_2_TRACKER": "0"}
 
     def start():
         return subprocess.Popen([sys.executable, str(ROOT / "main.py")], cwd=ROOT, env=env,
@@ -254,6 +262,22 @@ def main():
         lost_id = next(mid for c, mid, t in TG.ids if c == 1 and "grid lost" in t)
         check(wait(lambda: (1, lost_id) in TG.deleted, 20), "grid alert deleted after ALERT_TTL")
 
+        check(wait(lambda: len(msgs(CHANNEL)) >= 1), "channel got a status after start")
+        ch = msgs(CHANNEL)[0]
+        check("<pre>" in ch and "Updated" in ch and "🏠 Shared: ✅ grid ON" in ch.split("<pre>")[0],
+              "channel status: schedule + channel-owned inverter line")
+        check(not any("Home" in t for t in msgs(CHANNEL)), "channel does not see Home inverter")
+        check(not any("🏠 Shared" in t for t in msgs(1)), "chat 1 does not see the channel inverter")
+        check(wait(lambda: len(msgs(CHANNEL2)) >= 1), "channel 2 got its status")
+        ch2 = msgs(CHANNEL2)[0]
+        check("🏠 Second: ✅ grid ON" in ch2 and "Shared" not in ch2, "channel 2 shows only its own inverter")
+        check(ch.split("<pre>")[1] != ch2.split("<pre>")[1], "channels show their own groups (33.1 vs 2.1)")
+        DY.volts["SN4"] = 0.0
+        check(wait(lambda: any("Shared: grid lost" in t for t in msgs(CHANNEL))), "channel 1 gets its grid lost")
+        check(not any("grid lost" in t for t in msgs(CHANNEL2)), "channel 2 not alerted for Shared")
+        DY.volts["SN4"] = 230.0
+        check(wait(lambda: any("Shared: grid is back" in t for t in msgs(CHANNEL))), "channel 1 gets grid back")
+        channel_count = len(msgs(CHANNEL))
         check(wait(lambda: TG.pinned is not None), "state saved as pinned document")
         saved = json.loads(TG.files[TG.pinned["document"]["file_id"]])
         check(saved["chats"].get("1", {}).get("group") == "33.1", "saved state has chat 1 group")
@@ -276,6 +300,9 @@ def main():
         post(1, "/tracker 10")
         check(wait(lambda: TG.calls.count("editMessageMedia") > 0), "restart: state saved by editing the pin")
         check(TG.calls.count("sendDocument") == sends_before, "restart: no second state document")
+        time.sleep(5)
+        check(len(msgs(CHANNEL)) == channel_count, f"restart: channel status not reposted {[t[:60] for t in msgs(CHANNEL)[channel_count:]]}")
+        check(len(msgs(CHANNEL2)) == 1, "restart: channel 2 status not reposted")
     finally:
         proc.terminate()
         out2 = proc.communicate(timeout=10)[0]
