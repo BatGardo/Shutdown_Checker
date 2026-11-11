@@ -1,0 +1,13 @@
+.env
+*.env
+bot_state.json
+*.tmp
+__pycache__/
+*.pyc
+.venv/
+.git/
+tests/
+*.bat
+deye_token.py
+README.md
+CLAUDE.md

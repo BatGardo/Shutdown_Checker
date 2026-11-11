@@ -1,0 +1,11 @@
+# secrets and local state
+.env
+*.env
+!.env.example
+bot_state.json
+*.tmp
+
+# python
+__pycache__/
+*.pyc
+.venv/
