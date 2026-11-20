@@ -51,11 +51,14 @@ EMERGENCY_FRESH = timedelta(hours=24)
 
 # Channel with emergency news per region. DTEK's own @dtek_ua is late, so Kyiv uses "єСвітло Київ".
 CHANNELS = {"kyiv": "esvitlo_kyiv_ua"}
-EMERGENCY_RE = r"екстрен\w* відключ|аварійн\w* відключ|знеструмлен"
-# "будуть діяти графіки", "діють графіки", "графіки знову діють"; not "графіки не діють".
-SCHEDULES_BACK_RE = (r"(діят\w*|діють|діє|застосов\w*) графік|графік\w* (знову |вже )?(діють|діятимуть|діє)"
-                     r"|повертаю\w* графік")
-CANCEL_RE = r"скасова|завершен|припинен"
+# Triggers, matched against posts of the channel (user-defined, 2026-11-20):
+#   emergency start: "💡У Києві застосовані екстрені відключення світла!"
+#   emergency end:   "💡Екстрені відключення світла у Києві скасовані."
+# Other posts (news, "schedules will apply tomorrow", "most of the city is without power",
+# reminders that "schedules do not apply during emergency outages") do not change the state.
+EMERGENCY_RE = r"екстрен\w*\s+відключ"
+APPLIED_RE = r"застосов\w*|запровадж\w*"
+CANCEL_RE = r"скасов\w*|скасува\w*"
 EMERGENCY_REPEAT = timedelta(hours=3)
 
 DEYE_EVERY = _seconds("DEYE_POLL_SECONDS", 300)   # seconds between Deye Cloud polls per inverter
@@ -121,11 +124,15 @@ def fetch_channel_posts(channel: str) -> list[dict]:
 
 
 def classify(post: dict) -> str | None:
-    """'emergency', 'schedules_back' or None. The channel is already region-specific."""
+    """'emergency' (started), 'schedules_back' (cancelled) or None for every other post."""
     text = post["text"]
-    if re.search(EMERGENCY_RE, text, re.I):   # emergency posts also say "графіки не діють"
-        return "schedules_back" if re.search(CANCEL_RE, text, re.I) else "emergency"
-    return "schedules_back" if re.search(SCHEDULES_BACK_RE, text, re.I) else None
+    if not re.search(EMERGENCY_RE, text, re.I):
+        return None
+    if re.search(CANCEL_RE, text, re.I):
+        return "schedules_back"
+    if re.search(APPLIED_RE, text, re.I):
+        return "emergency"
+    return None
 
 
 def emergency_message(post: dict, kind: str, channel: str) -> str:
